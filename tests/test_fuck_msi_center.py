@@ -27,6 +27,8 @@ class GuiShutdownFlowTests(unittest.TestCase):
         with mock.patch.object(GUI.FuckMsiCenterApp, "refresh_status"):
             self.app = GUI.FuckMsiCenterApp(self.root, self.dpi_mode)
         self.app.admin = True
+        self.app.hardware_model = "Sword 16 HX B14VGKG"
+        self.app.access_tier = "Full"
         self.root.update_idletasks()
 
     def tearDown(self) -> None:
@@ -34,6 +36,59 @@ class GuiShutdownFlowTests(unittest.TestCase):
 
     def test_auto_shutdown_is_default_off(self) -> None:
         self.assertFalse(self.app.auto_shutdown_var.get())
+
+    def test_exact_model_access_tiers(self) -> None:
+        self.assertEqual(GUI.model_access_tier("Sword 16 HX B14VGKG"), "Full")
+        self.assertEqual(GUI.model_access_tier("Sword 16 HX B14VEKG"), "GpuModeOnly")
+        self.assertEqual(GUI.model_access_tier("Sword 16 HX B14VFKG"), "GpuModeOnly")
+        self.assertEqual(GUI.model_access_tier("Sword 16 HX Unknown"), "Unsupported")
+
+    def test_horizontal_model_warns_once_and_locks_non_gpu_features(self) -> None:
+        status = {
+            "Success": True,
+            "Model": "Sword 16 HX B14VFKG",
+            "AccessTier": "GpuModeOnly",
+            "HorizontalCompatibility": True,
+            "Mode": "Hybrid",
+            "ModeIndex": 0,
+            "StagedTargetIndex": 0,
+            "LegacyWmiData0": "0x0B",
+            "NewSwitchSupport": True,
+            "DiscreteSupport": True,
+            "IntegratedSupport": True,
+        }
+        ap_state = {"Data1": 0, "Pending": False}
+        with mock.patch.object(GUI.messagebox, "showwarning") as warning:
+            self.app._finish_refresh((status, ap_state, None))
+            self.app._finish_refresh((status, ap_state, None))
+        warning.assert_called_once()
+        self.assertEqual(self.app.access_tier, "GpuModeOnly")
+        self.assertEqual(str(self.app.open_oc_button.cget("state")), "normal")
+        self.assertEqual(str(self.app.open_system_button.cget("state")), "disabled")
+        self.assertEqual(str(self.app.open_battery_button.cget("state")), "disabled")
+        self.assertIn("僅 GPU 功能", str(self.app.compatibility_value.cget("text")))
+
+    def test_full_model_keeps_all_feature_buttons_available(self) -> None:
+        status = {
+            "Success": True,
+            "Model": "Sword 16 HX B14VGKG",
+            "AccessTier": "Full",
+            "HorizontalCompatibility": False,
+            "Mode": "Hybrid",
+            "ModeIndex": 0,
+            "StagedTargetIndex": 0,
+            "LegacyWmiData0": "0x0B",
+            "NewSwitchSupport": True,
+            "DiscreteSupport": True,
+            "IntegratedSupport": True,
+        }
+        with mock.patch.object(GUI.messagebox, "showwarning") as warning:
+            self.app._finish_refresh((status, {"Data1": 0, "Pending": False}, None))
+        warning.assert_not_called()
+        self.assertEqual(self.app.access_tier, "Full")
+        self.assertEqual(str(self.app.open_oc_button.cget("state")), "normal")
+        self.assertEqual(str(self.app.open_system_button.cget("state")), "normal")
+        self.assertEqual(str(self.app.open_battery_button.cget("state")), "normal")
 
     def test_cancel_switch_confirmation_sends_no_request_and_no_shutdown(self) -> None:
         for target in GUI.MODE_ORDER:
