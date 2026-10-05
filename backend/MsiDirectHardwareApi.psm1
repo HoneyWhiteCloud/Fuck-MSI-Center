@@ -7,9 +7,18 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ApiVersion = '0.3.0'
+$script:ApiVersion = '0.4.0'
 $script:ExpectedManufacturerPattern = 'Micro-Star|MSI'
-$script:ExpectedModel = 'Sword 16 HX B14VGKG'
+$script:FullFeatureModels = @('Sword 16 HX B14VGKG')
+# MSI publishes one byte-identical E15P2IMS.110 image for these three Sword 16
+# HX GPU SKUs.  Only the GPU MUX primitive is allowed across that horizontal
+# firmware family; webcam, battery and other EC-facing controls remain locked
+# to the live-validated B14VGKG model.
+$script:GpuModeModels = @(
+    'Sword 16 HX B14VEKG',
+    'Sword 16 HX B14VFKG',
+    'Sword 16 HX B14VGKG'
+)
 $script:BiosKey = 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS'
 $script:WmiNamespace = '\\.\root\WMI'
 $script:WmiInstanceName = 'ACPI\PNP0C14\0_0'
@@ -28,15 +37,36 @@ function Test-MsiDirectAdministrator {
 }
 
 function Assert-MsiDirectHardwareIdentity {
+    param(
+        [ValidateSet('Full', 'GpuMode')]
+        [string]$Capability = 'Full'
+    )
+
     $bios = Get-ItemProperty -LiteralPath $script:BiosKey
     $manufacturer = [string]$bios.SystemManufacturer
     $model = [string]$bios.SystemProductName
-    if ($manufacturer -notmatch $script:ExpectedManufacturerPattern -or $model -ne $script:ExpectedModel) {
-        throw "Direct MSI firmware semantics are not validated for this hardware: manufacturer=$manufacturer, model=$model"
+    $allowedModels = if ($Capability -eq 'GpuMode') {
+        $script:GpuModeModels
     }
+    else {
+        $script:FullFeatureModels
+    }
+    if ($manufacturer -notmatch $script:ExpectedManufacturerPattern -or $model -notin $allowedModels) {
+        throw "Direct MSI $Capability semantics are not allowed for this hardware: manufacturer=$manufacturer, model=$model; allowed=$($allowedModels -join ', ')"
+    }
+    $accessTier = if ($model -in $script:FullFeatureModels) { 'Full' } else { 'GpuModeOnly' }
     return [pscustomobject]@{
         Manufacturer = $manufacturer
         Model = $model
+        FirmwareFamily = 'E15P2'
+        AccessTier = $accessTier
+        HorizontalCompatibility = ($accessTier -eq 'GpuModeOnly')
+        AllowedCapabilities = if ($accessTier -eq 'Full') {
+            @('GpuMode', 'GpuOc', 'WebCam', 'Battery', 'SystemControls')
+        }
+        else {
+            @('GpuMode', 'GpuOc')
+        }
     }
 }
 
@@ -670,19 +700,26 @@ function Compare-MsiDirectFirmwareData {
 
 function Get-MsiDirectHardwareProbe {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet('Full', 'GpuMode')]
+        [string]$Capability = 'Full'
+    )
 
-    $identity = Assert-MsiDirectHardwareIdentity
+    $identity = Assert-MsiDirectHardwareIdentity -Capability $Capability
     $mutex = Enter-MsiDirectAcpiMutex
     try {
         $context = New-MsiDirectAcpiContext
-        $webcam = Get-MsiDirectWebCamStateInternal -Context $context
-        $fnWin = Invoke-MsiDirectAcpiGet -Context $context -Method Get_Data -Selector 0xE8
+        $webcam = $null
+        $fnWin = $null
+        if ($Capability -eq 'Full') {
+            $webcam = Get-MsiDirectWebCamStateInternal -Context $context
+            $fnWin = Invoke-MsiDirectAcpiGet -Context $context -Method Get_Data -Selector 0xE8
+            if ($fnWin.Flag -eq 0 -or $fnWin.Response.Length -lt 2) {
+                throw "Get_Data(0xE8) returned an invalid response: $($fnWin.ResponseHex)"
+            }
+        }
         $device = Invoke-MsiDirectAcpiGet -Context $context -Method Get_Device -Selector 0x01
         $ap = Invoke-MsiDirectAcpiGet -Context $context -Method Get_AP -Selector 0x00
-        if ($fnWin.Flag -eq 0 -or $fnWin.Response.Length -lt 2) {
-            throw "Get_Data(0xE8) returned an invalid response: $($fnWin.ResponseHex)"
-        }
         if ($device.Flag -eq 0 -or $device.Response.Length -lt 2) {
             throw "Get_Device(1) returned an invalid response: $($device.ResponseHex)"
         }
@@ -729,18 +766,25 @@ function Get-MsiDirectHardwareProbe {
         Operation = 'DirectHardwareProbe'
         Manufacturer = $identity.Manufacturer
         Model = $identity.Model
+        FirmwareFamily = $identity.FirmwareFamily
+        AccessTier = $identity.AccessTier
+        HorizontalCompatibility = $identity.HorizontalCompatibility
+        AllowedCapabilities = $identity.AllowedCapabilities
+        ProbeCapability = $Capability
         Backend = 'WindowsFirmwareApi+DirectWmiAcpi'
         ServiceIndependent = $true
         WritesRegistry = $false
         WritesFirmware = $false
         SendsSetCommand = $false
         WebCam = $webcam
-        FnWin = [pscustomobject]@{
-            EcAddress = '0xE8'
-            EcByte = ('0x{0:X2}' -f [byte]$fnWin.Response[1])
-            EcBit4Set = (([byte]$fnWin.Response[1] -band 0x10) -ne 0)
-            RawResponse = $fnWin.ResponseHex
-        }
+        FnWin = if ($null -ne $fnWin) {
+            [pscustomobject]@{
+                EcAddress = '0xE8'
+                EcByte = ('0x{0:X2}' -f [byte]$fnWin.Response[1])
+                EcBit4Set = (([byte]$fnWin.Response[1] -band 0x10) -ne 0)
+                RawResponse = $fnWin.ResponseHex
+            }
+        } else { $null }
         Gpu = $gpu
         FirmwareReadAvailable = ($null -ne $firmware)
         FirmwareReadError = $firmwareError
@@ -827,12 +871,13 @@ function Request-MsiDirectGpuModeSwitch {
     $previousByte5 = $null
     $plannedByte5 = $null
     $d1Payload = $null
+    $identity = $null
 
     try {
         if (-not (Test-MsiDirectAdministrator)) {
             throw 'Administrator privileges are required for direct UEFI and MSI_ACPI writes.'
         }
-        $identity = Assert-MsiDirectHardwareIdentity
+        $identity = Assert-MsiDirectHardwareIdentity -Capability GpuMode
         $mutex = Enter-MsiDirectAcpiMutex
         $context = New-MsiDirectAcpiContext
 
@@ -896,6 +941,11 @@ function Request-MsiDirectGpuModeSwitch {
                 Operation = 'DirectGpuModeRequest'
                 Backend = 'WindowsFirmwareApi+DirectWmiAcpi'
                 ServiceIndependent = $true
+                Manufacturer = $identity.Manufacturer
+                Model = $identity.Model
+                FirmwareFamily = $identity.FirmwareFamily
+                AccessTier = $identity.AccessTier
+                HorizontalCompatibility = $identity.HorizontalCompatibility
                 Target = $Target
                 TargetIndex = $targetIndex
                 PreviousMode = $currentMode
@@ -983,6 +1033,9 @@ function Request-MsiDirectGpuModeSwitch {
             ServiceIndependent = $true
             Manufacturer = $identity.Manufacturer
             Model = $identity.Model
+            FirmwareFamily = $identity.FirmwareFamily
+            AccessTier = $identity.AccessTier
+            HorizontalCompatibility = $identity.HorizontalCompatibility
             Target = $Target
             TargetIndex = $targetIndex
             PreviousMode = $currentMode

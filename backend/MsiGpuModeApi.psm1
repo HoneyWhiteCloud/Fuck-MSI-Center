@@ -8,7 +8,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ApiVersion = '0.2.0'
+$script:ApiVersion = '0.3.0'
 $script:ModeNames = @('Hybrid', 'Discrete', 'Integrated')
 $script:DirectModule = Join-Path $PSScriptRoot 'MsiDirectHardwareApi.psd1'
 
@@ -37,7 +37,10 @@ function Get-MsiGpuModeStatus {
     [CmdletBinding()]
     param()
 
-    $probe = Get-MsiDirectHardwareProbe
+    # The GPU-only probe deliberately avoids webcam, battery and Fn/Win EC
+    # reads.  Horizontal E15P2 SKU support must not silently broaden those
+    # still model-locked features.
+    $probe = Get-MsiDirectHardwareProbe -Capability GpuMode
     if (-not $probe.Success -or -not $probe.FirmwareReadAvailable -or $null -eq $probe.Gpu) {
         $message = if ($probe.FirmwareReadError) { $probe.FirmwareReadError } else { 'Direct UEFI GPU state is unavailable.' }
         throw $message
@@ -61,6 +64,12 @@ function Get-MsiGpuModeStatus {
         Success                 = [bool]$statusValid
         Operation               = 'Status'
         ExitCode                = if ($statusValid) { 0 } else { 1 }
+        Manufacturer            = [string]$probe.Manufacturer
+        Model                   = [string]$probe.Model
+        FirmwareFamily          = [string]$probe.FirmwareFamily
+        AccessTier              = [string]$probe.AccessTier
+        HorizontalCompatibility = [bool]$probe.HorizontalCompatibility
+        AllowedCapabilities     = @($probe.AllowedCapabilities)
         Mode                    = $mode
         ModeIndex               = $modeIndex
         StagedTarget            = [string]$probe.Gpu.StagedTarget
@@ -133,6 +142,14 @@ function Get-MsiGpuModePlan {
         Operation                  = 'Plan'
         Target                     = $Target
         TargetIndex                = [int]$direct.TargetIndex
+        Manufacturer               = [string]$status.Manufacturer
+        Model                      = [string]$status.Model
+        FirmwareFamily             = [string]$status.FirmwareFamily
+        AccessTier                 = [string]$status.AccessTier
+        HorizontalCompatibility    = [bool]$status.HorizontalCompatibility
+        CompatibilityWarning       = if ($status.HorizontalCompatibility) {
+            'This Sword 16 HX SKU uses the byte-identical E15P2IMS.110 firmware family but has not completed model-specific live write validation. Only GPU MUX and GPU OC are enabled.'
+        } else { $null }
         CurrentMode                = [string]$status.Mode
         CurrentModeIndex           = [int]$status.ModeIndex
         AlreadyApplied             = ([string]$status.Mode -eq $Target)

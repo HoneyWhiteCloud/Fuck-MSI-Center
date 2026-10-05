@@ -94,6 +94,20 @@ SHUTDOWN_EXE = (
 BASE_DPI = 96
 BASE_WINDOW_SIZE = (940, 700)
 BASE_MINIMUM_SIZE = (820, 620)
+FULL_FEATURE_MODELS = frozenset({"Sword 16 HX B14VGKG"})
+GPU_ONLY_HORIZONTAL_MODELS = frozenset(
+    {"Sword 16 HX B14VEKG", "Sword 16 HX B14VFKG"}
+)
+GPU_CAPABLE_MODELS = FULL_FEATURE_MODELS | GPU_ONLY_HORIZONTAL_MODELS
+
+
+def model_access_tier(model: str) -> str:
+    """Return the deliberately narrow feature tier for one exact SMBIOS model."""
+    if model in FULL_FEATURE_MODELS:
+        return "Full"
+    if model in GPU_ONLY_HORIZONTAL_MODELS:
+        return "GpuModeOnly"
+    return "Unsupported"
 
 
 def enable_windows_high_dpi_awareness() -> str:
@@ -512,6 +526,9 @@ class FuckMsiCenterApp:
         self.busy = False
         self.status: dict[str, Any] | None = None
         self.ap_state: dict[str, Any] | None = None
+        self.hardware_model = ""
+        self.access_tier = "Unknown"
+        self.compatibility_notice_shown = False
         self.auto_shutdown_var = tk.BooleanVar(value=False)
         self.mode_buttons: dict[str, ttk.Button] = {}
         self.oc_dialog: MsiGpuOcWindow | None = None
@@ -609,9 +626,12 @@ class FuckMsiCenterApp:
         ttk.Label(status_frame, text="Legacy WMI：").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.legacy_value = ttk.Label(status_frame, text="—")
         self.legacy_value.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(status_frame, text="相容層級：").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.compatibility_value = ttk.Label(status_frame, text="驗證中…")
+        self.compatibility_value.grid(row=3, column=1, sticky="w", pady=(6, 0))
 
         action_bar = ttk.Frame(status_frame)
-        action_bar.grid(row=0, column=2, rowspan=3, padx=(12, 0), sticky="e")
+        action_bar.grid(row=0, column=2, rowspan=4, padx=(12, 0), sticky="e")
         self.refresh_button = ttk.Button(action_bar, text="重新整理", command=self.refresh_status)
         self.refresh_button.pack(fill="x")
         self.copy_shutdown_button = ttk.Button(
@@ -741,14 +761,29 @@ class FuckMsiCenterApp:
         self.footer_value.configure(text=footer)
         self.refresh_button.configure(state="disabled" if busy else "normal")
         self.auto_shutdown_checkbox.configure(state="disabled" if busy else "normal")
-        self.open_oc_button.configure(state="disabled" if busy else "normal")
-        self.open_system_button.configure(state="disabled" if busy else "normal")
-        self.open_battery_button.configure(state="disabled" if busy else "normal")
+        gpu_features_allowed = self.access_tier in ("Full", "GpuModeOnly")
+        full_features_allowed = self.access_tier == "Full"
+        self.open_oc_button.configure(
+            state="normal" if not busy and gpu_features_allowed else "disabled"
+        )
+        self.open_system_button.configure(
+            state="normal" if not busy and full_features_allowed else "disabled"
+        )
+        self.open_battery_button.configure(
+            state="normal" if not busy and full_features_allowed else "disabled"
+        )
         if self.battery_dialog is not None:
             self.battery_dialog._update_actions()
         self._update_button_states()
 
     def open_oc_window(self) -> None:
+        if self.access_tier not in ("Full", "GpuModeOnly"):
+            messagebox.showwarning(
+                "機型尚未開放",
+                "尚未取得受支援的 Sword 16 HX E15P2 機型身分；GPU 調校保持鎖定。",
+                parent=self.root,
+            )
+            return
         if self.oc_dialog is not None and self.oc_dialog.window.winfo_exists():
             self.oc_dialog.window.deiconify()
             self.oc_dialog.window.lift()
@@ -757,6 +792,14 @@ class FuckMsiCenterApp:
         self.oc_dialog = MsiGpuOcWindow(self)
 
     def open_system_window(self) -> None:
+        if self.access_tier != "Full":
+            messagebox.showwarning(
+                "功能限於已驗證機型",
+                "系統快捷控制目前只對 Sword 16 HX B14VGKG 開放。"
+                "水平相容 SKU 僅開放 GPU 模式與 GPU 超頻。",
+                parent=self.root,
+            )
+            return
         if self.system_dialog is not None and self.system_dialog.window.winfo_exists():
             self.system_dialog.window.deiconify()
             self.system_dialog.window.lift()
@@ -766,6 +809,14 @@ class FuckMsiCenterApp:
 
     def open_battery_window(self) -> None:
         if self.busy:
+            return
+        if self.access_tier != "Full":
+            messagebox.showwarning(
+                "功能限於已驗證機型",
+                "電池充電上限目前只對 Sword 16 HX B14VGKG 開放。"
+                "水平相容 SKU 僅開放 GPU 模式與 GPU 超頻。",
+                parent=self.root,
+            )
             return
         if self.battery_dialog is not None and self.battery_dialog.window.winfo_exists():
             self.battery_dialog.window.deiconify()
@@ -791,6 +842,7 @@ class FuckMsiCenterApp:
         new_switch_supported = bool(status.get("NewSwitchSupport"))
         can_switch = (
             self.admin
+            and self.access_tier in ("Full", "GpuModeOnly")
             and verified
             and ap_known
             and not pending
@@ -805,6 +857,51 @@ class FuckMsiCenterApp:
             )
             enabled = can_switch and mode_supported and mode != current
             button.configure(state="normal" if enabled else "disabled")
+
+    def _apply_compatibility_status(self, status: dict[str, Any]) -> None:
+        """Apply the backend identity tier without broadening its exact allowlist."""
+        model = str(status.get("Model") or "")
+        derived_tier = model_access_tier(model)
+        reported_tier = str(status.get("AccessTier") or "")
+        if status.get("Success") and reported_tier == derived_tier:
+            tier = derived_tier
+        else:
+            tier = "Unsupported"
+        self.hardware_model = model
+        self.access_tier = tier
+
+        if tier == "Full":
+            self.compatibility_value.configure(
+                text=f"完整驗證｜{model}", foreground="#1f6d3a"
+            )
+        elif tier == "GpuModeOnly":
+            self.compatibility_value.configure(
+                text=f"E15P2 水平相容｜{model}｜僅 GPU 功能",
+                foreground="#7a5d00",
+            )
+            if not self.compatibility_notice_shown:
+                self.compatibility_notice_shown = True
+                warning = (
+                    f"偵測到：{model}\n\n"
+                    "此機型與已驗證機型同屬 Sword 16 HX／E15P2，三個 GPU SKU 的 "
+                    "E15P2IMS.110 BIOS 已確認逐位元相同，但目前尚未完成此 SKU 的實機寫入驗證。\n\n"
+                    "本次只開放：\n"
+                    "• GPU MUX 狀態、計畫與受護切換\n"
+                    "• GPU 核心／VRAM 調校\n\n"
+                    "系統快捷控制與電池充電上限仍保持鎖定。所有 firmware layout、"
+                    "support bit、WMI cross-check、AP pending 與 read-back guard 仍會執行。\n\n"
+                    "若功能不符合此機型，可保留 Log，依開源程式碼針對該機型進一步適配；"
+                    "請勿直接移除硬體保護或自動重試 firmware request。"
+                )
+                self.log(f"水平相容模式：{model}；僅開放 GPU MUX 與 GPU OC。")
+                messagebox.showwarning(
+                    "實驗性 E15P2 水平相容模式", warning, parent=self.root
+                )
+        else:
+            shown_model = model or "未知機型"
+            self.compatibility_value.configure(
+                text=f"未開放｜{shown_model}", foreground="#a12222"
+            )
 
     def refresh_status(self) -> None:
         if self.busy:
@@ -830,6 +927,7 @@ class FuckMsiCenterApp:
         status, ap_state, ap_error = result
         self.status = status
         self.ap_state = ap_state
+        self._apply_compatibility_status(status)
         mode = str(status.get("Mode", "Unknown"))
         mode_index = status.get("ModeIndex", "?")
         success = bool(status.get("Success"))
@@ -873,6 +971,13 @@ class FuckMsiCenterApp:
 
     def prepare_switch(self, target: str) -> None:
         if self.busy:
+            return
+        if self.access_tier not in ("Full", "GpuModeOnly"):
+            messagebox.showwarning(
+                "機型尚未開放",
+                "GPU MUX 只對已列入 E15P2 相容清單的 Sword 16 HX 機型開放。",
+                parent=self.root,
+            )
             return
         if not self.admin:
             messagebox.showwarning(
@@ -960,7 +1065,15 @@ class FuckMsiCenterApp:
             if auto_shutdown
             else "確定要送出一次 request 嗎？"
         )
+        horizontal_warning = (
+            "⚠ 此機型目前屬 E15P2 水平相容模式，尚未完成該 GPU SKU 的實機寫入驗證。\n"
+            "只因 BIOS 逐位元相同而開放 GPU 功能；所有 runtime guard 均已通過才會到達此確認。\n\n"
+            if self.access_tier == "GpuModeOnly"
+            else ""
+        )
         confirmation = (
+            f"{horizontal_warning}"
+            f"機型：{self.hardware_model or status.get('Model') or '未知'}\n"
             f"目前 applied mode：{status.get('Mode')}\n"
             f"目標模式：{target}\n\n"
             f"後端：{plan.get('Backend')}（不依賴 MSI service）\n"
@@ -2189,6 +2302,10 @@ def run_self_test() -> int:
     sample = '{"Success":true,"Mode":"Integrated","ModeIndex":2}'
     parsed = parse_json_output(sample)
     assert parsed["Success"] is True and parsed["ModeIndex"] == 2
+    assert model_access_tier("Sword 16 HX B14VGKG") == "Full"
+    assert model_access_tier("Sword 16 HX B14VEKG") == "GpuModeOnly"
+    assert model_access_tier("Sword 16 HX B14VFKG") == "GpuModeOnly"
+    assert model_access_tier("Sword 17 HX B14VGKG") == "Unsupported"
     value, pending = parse_ap_state("Data[1]             : 0x02")
     assert value == 2 and pending is True
     value, pending = parse_ap_state("Data[1]             : 0x00")

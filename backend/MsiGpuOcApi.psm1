@@ -6,7 +6,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'NvapiDriverLimits.ps1')
 
-$script:ApiVersion = '0.3.0'
+$script:ApiVersion = '0.4.0'
+$script:FullFeatureModels = @('Sword 16 HX B14VGKG')
+$script:AllowedModels = @(
+    'Sword 16 HX B14VEKG',
+    'Sword 16 HX B14VFKG',
+    'Sword 16 HX B14VGKG'
+)
 $script:BaseKey = 'HKLM:\SOFTWARE\WOW6432Node\MSI\MSI Center\Component\Base Module'
 $script:ScenarioKey = Join-Path $script:BaseKey 'Scenario'
 $script:UserScenarioKey = Join-Path $script:BaseKey 'User Scenario'
@@ -388,6 +394,9 @@ function Assert-MsiGpuOcHardwareIdentity {
     if ([string]$computer.Manufacturer -notmatch 'Micro-Star International') {
         throw "Unexpected system manufacturer: $($computer.Manufacturer)"
     }
+    if ([string]$computer.Model -notin $script:AllowedModels) {
+        throw "GPU OC is not enabled for model '$($computer.Model)'. Allowed E15P2 models: $($script:AllowedModels -join ', ')."
+    }
     if ([string]$computer.Model -cne $ExpectedModel) {
         throw "Model guard failed. Actual='$($computer.Model)', Expected='$ExpectedModel'."
     }
@@ -398,6 +407,8 @@ function Assert-MsiGpuOcHardwareIdentity {
         Manufacturer = [string]$computer.Manufacturer
         Model        = [string]$computer.Model
         GpuName      = $ExpectedGpuName
+        FirmwareFamily = 'E15P2'
+        AccessTier = if ([string]$computer.Model -in $script:FullFeatureModels) { 'Full' } else { 'GpuModeOnly' }
     }
 }
 

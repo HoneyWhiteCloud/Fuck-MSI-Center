@@ -1,6 +1,9 @@
 # Fuck-MSI-Center
 
-Fuck-MSI-Center 是適用於 MSI Sword 16 HX B14VGKG 的輕量 MSI Center 替代工具。除 GPU MUX 外，也提供 GPU 調校、系統快捷控制與電池充電上限：
+Fuck-MSI-Center 是適用於 MSI Sword 16 HX E15P2 平台的輕量 MSI Center 替代工具。已完成
+完整實機驗證的機型是 B14VGKG；使用相同 E15P2IMS.110 BIOS 的 B14VEKG／B14VFKG
+以「水平相容模式」開放 GPU MUX 與 GPU 調校。除此之外，工具也在完整驗證機型提供
+系統快捷控制與電池充電上限：
 
 - MSHybrid、Discrete 與 Integrated 三模式狀態與切換；
 - 直接 UEFI authoritative status、legacy WMI cross-check 與 AP pending guard；
@@ -68,8 +71,22 @@ firmware-environment API 與直接 `MSI_ACPI` 執行；舊 CentralServer harness
 - MSI firmware 的 `MSI_ACPI` WMI provider；只有 WinKey 與 Fn／Win 仍需 MSI Center／NBFoundation 對應服務；
 - 切換模式需要正常 Windows UAC 系統管理員權限。
 
-本工具的 firmware guards 目前只驗證 MSI Sword 16 HX B14VGKG。其他型號會被拒絕，
-不應移除硬體、WMI instance、UEFI layout、support bit、AP 或 read-back guards 後強行使用。
+### 機型與功能層級
+
+| SMBIOS 機型 | GPU MUX | GPU OC | 系統快捷控制 | 電池上限 |
+|---|---:|---:|---:|---:|
+| Sword 16 HX B14VGKG | 完整驗證 | 開放 | 開放 | 開放 |
+| Sword 16 HX B14VEKG | E15P2 水平相容 | 開放 | 鎖定 | 鎖定 |
+| Sword 16 HX B14VFKG | E15P2 水平相容 | 開放 | 鎖定 | 鎖定 |
+| 其他機型 | 拒絕 | GUI 鎖定 | 拒絕 | 拒絕 |
+
+三個 Sword 16 HX GPU SKU 的原廠 E15P2IMS.110 映像已確認 SHA-256 與逐位元內容完全
+相同。水平相容機型啟動後會顯示一次警告，且每次 MUX 寫入確認仍會標示尚未完成該
+SKU 的實機寫入驗證。這只擴大 GPU capability 的精確 allowlist；WebCam、Battery 與
+其他 EC 功能仍由後端鎖定在 B14VGKG。
+
+不應移除硬體身分、WMI instance、UEFI layout、support bit、AP 或 read-back guards 後
+強行使用，也不應把 `Sword 16*` 當成無條件萬用匹配。
 
 ## GPU MUX 直接後端
 
@@ -104,7 +121,7 @@ CentralServer 32683 在同时处理多个 client 时可发生 response crossover
 事务。不要绕过此 API 自行并发发送命令。
 锁名称保留旧版标识，以便与旧版本共用并发保护；它不是产品名称。
 
-目前 API 仍精確鎖定已驗證的 Sword 16 HX B14VGKG，但不再因版本號不同而封鎖。
+General Settings API 仍精確鎖定已驗證的 Sword 16 HX B14VGKG，但不再因版本號不同而封鎖。
 Base Module 1.0.2606.0801 與 CentralServer 3.2026.0427.01 是已驗證基準；不同版本在
 MSI Authenticode、服務身分、component ID、port 與 `IsSupport/Get` 檢查通過後仍可使用，
 Status、Plan、Set 與 GUI 都會顯示「尚未驗證版本」警告。
@@ -132,7 +149,7 @@ Status、Plan、Set 與 GUI 都會顯示「尚未驗證版本」警告。
 此功能不需要 MSI Center UI／CentralServer，不載入 MSI DLL，也不改 MSI Registry 偏好。
 重新開啟 MSI Center 或其 AI Charger 時可能重新套用官方保存的模式；若讀到
 `BatteryMode=3`，視窗及套用確認會提示 AI Charger 可能覆蓋設定。缺少 MSI 偏好鍵不影響
-直接後端。與其他直接控制一樣，目前鎖定 Sword 16 HX B14VGKG，套用需要管理員權限。
+直接後端。此功能仍鎖定 Sword 16 HX B14VGKG，套用需要管理員權限。
 
 驗證範圍（2026-10-02）：本機官方服務唯讀命令讀到 raw `0xE4`、上限 100%；18 組後端
 mock 模式轉換與 8 個電池 GUI 測試通過。此次 UAC 被取消，直接 production WMI 讀取與
@@ -163,7 +180,8 @@ mock 模式轉換與 8 個電池 GUI 測試通過。此次 UAC 被取消，直�
 
 保存與套用都有各自的逐次警告。後端還會確認系統管理員權限、`IsSupOC=1`、
 精確機型、精確 NVIDIA adapter 名稱、动态 NVIDIA driver range，以及 `gpuControl.exe`／`GInf.dll`
-Authenticode 簽章。任何失敗都不會自動重試。
+Authenticode 簽章。GPU OC 後端只允許上述三個精確 E15P2 SMBIOS 機型名稱；任何失敗
+都不會自動重試。
 
 本机 NVIDIA driver 616.92 实读范围为 core `-1000..1000 MHz`、VRAM
 `-1000..3000 MHz`。GUI 为确保 MSI/GInf 读回验证可靠，只开放非负 `0..1000` 与
